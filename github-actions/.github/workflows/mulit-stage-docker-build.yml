@@ -1,0 +1,191 @@
+name: Multi-Environment React Frontend Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - stg
+          - uat
+          - prod
+      version_type:
+        description: 'Version Update Type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+env:
+  login-server: ${{ secrets.REGISTRY_NAME }}
+  docker_password: ${{ secrets.DOCKER_PASSWORD }}
+  docker_username: ${{ secrets.DOCKER_USERNAME }}
+  base_app_name: react-ui
+  config_repo_path: /datadisk/actions-runner/_work/cicd-config/cicd-config
+  frontend_repo_path: /datadisk/actions-runner/_work/react-ui/react-ui
+  env_base_path: /datadisk/react-env/ui/org1
+
+jobs:
+  docker-build:
+    name: Build, Scan, Version, Tag and Push
+    runs-on: cicd
+
+    outputs:
+      environment: ${{ github.event.inputs.environment }}
+      service_version: ${{ steps.version_update.outputs.service_version }}
+
+    steps:
+      - name: Checkout Frontend Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install python packages
+        run: |
+          pip install python-dotenv semantic_version
+
+      - name: Set initial variables
+        id: initial_vars
+        run: |
+          APP_NAME="${{ env.base_app_name }}-${{ github.event.inputs.environment }}"
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          
+          case "${{ github.event.inputs.environment }}" in
+            dev)
+              ENV_SOURCE_PATH="${{ env.config_repo_path }}/Org1/DEV/UI/.env"
+              ENV_DISPLAY_NAME="DEV"
+              ;;
+            stg)
+              ENV_SOURCE_PATH="${{ env.config_repo_path }}/Org2/STG/UI/.env"
+              ENV_DISPLAY_NAME="STG"
+              ;;
+            uat)
+              ENV_SOURCE_PATH="${{ env.config_repo_path }}/Org1/UAT/UI/.env"
+              ENV_DISPLAY_NAME="UAT"
+              ;;
+            prod)
+              ENV_SOURCE_PATH="${{ env.config_repo_path }}/Org1/PROD/UI/.env"
+              ENV_DISPLAY_NAME="PROD"
+              ;;
+          esac
+
+          echo "env_source_path=$ENV_SOURCE_PATH" >> $GITHUB_OUTPUT
+          echo "env_display_name=$ENV_DISPLAY_NAME" >> $GITHUB_OUTPUT
+
+      - name: Copy environment file
+        run: |
+          echo "Copying ${{ steps.initial_vars.outputs.env_display_name }} environment file..."
+          cp "${{ steps.initial_vars.outputs.env_source_path }}" "${{ env.frontend_repo_path }}/.env"
+
+          if [ -f "${{ env.frontend_repo_path }}/.env" ]; then
+            echo "✅ Environment file copied successfully"
+            cat "${{ env.frontend_repo_path }}/.env"
+          else
+            echo "❌ Failed to copy environment file"
+            exit 1
+          fi
+
+      - name: Login to Docker Registry
+        run: echo "${{ env.docker_password }}" | docker login ${{ env.login-server }} -u "${{ env.docker_username }}" --password-stdin
+
+      - name: Build Docker image
+        run: |
+          cd "${{ env.frontend_repo_path }}"
+          echo "Building image for ${{ steps.initial_vars.outputs.env_display_name }}..."
+          docker build -t ${{ steps.initial_vars.outputs.app_name }}:temp -f Dockerfile .
+          echo "✅ Docker image built successfully"
+
+      - name: Scan Docker image for vulnerabilities
+        uses: crazy-max/ghaction-container-scan@v3
+        with:
+          image: ${{ steps.initial_vars.outputs.app_name }}:temp
+          dockerfile: Dockerfile
+          severity_threshold: CRITICAL
+        continue-on-error: true
+
+      - name: Update version after successful build
+        id: version_update
+        run: |
+          echo "Build successful — updating version..."
+          case "${{ github.event.inputs.environment }}" in
+            dev) ENV_FILE="${{ env.env_base_path }}/.env.dev" ;;
+            stg) ENV_FILE="${{ env.env_base_path }}/.env.stg" ;;
+            uat) ENV_FILE="${{ env.env_base_path }}/.env.uat" ;;
+            prod) ENV_FILE="${{ env.env_base_path }}/.env.prod" ;;
+          esac
+
+          echo "env_file_path=$ENV_FILE" >> $GITHUB_OUTPUT
+          CURRENT_VERSION=$(grep "service_version=" "$ENV_FILE" | cut -d'=' -f2)
+          python .github/workflows/scripts/pyver.py "${{ github.event.inputs.version_type }}" "${{ github.event.inputs.environment }}" "${{ env.env_base_path }}"
+          SERVICE_VERSION=$(grep "service_version=" "$ENV_FILE" | cut -d'=' -f2)
+          echo "service_version=$SERVICE_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Version updated from $CURRENT_VERSION to $SERVICE_VERSION"
+
+      - name: Tag and Push Docker image
+        run: |
+          docker tag ${{ steps.initial_vars.outputs.app_name }}:temp \
+            ${{ env.login-server }}/${{ steps.initial_vars.outputs.app_name }}:${{ steps.version_update.outputs.service_version }}
+          docker push ${{ env.login-server }}/${{ steps.initial_vars.outputs.app_name }}:${{ steps.version_update.outputs.service_version }}
+          docker rmi ${{ steps.initial_vars.outputs.app_name }}:temp || true
+
+      - name: Cleanup sensitive files
+        if: always()
+        run: |
+          rm -f "${{ env.frontend_repo_path }}/.env" || true
+          echo "✅ Cleaned up environment file"
+
+      - name: Build Summary
+        run: |
+          echo "## 🚀 Frontend Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Type:** ${{ github.event.inputs.version_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Name:** ${{ steps.initial_vars.outputs.app_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New Version:** ${{ steps.version_update.outputs.service_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry Image:** ${{ env.login-server }}/${{ steps.initial_vars.outputs.app_name }}:${{ steps.version_update.outputs.service_version }}" >> $GITHUB_STEP_SUMMARY
+
+  trigger-deploy:  
+    name: Trigger Environment-Specific Deployment
+    runs-on: web3
+    needs: docker-build
+    if: ${{ needs.docker-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: write
+  
+    steps:
+    - name: Determine deployment workflow
+      id: deploy_workflow
+      run: |
+        case "${{ github.event.inputs.environment }}" in
+          dev)  echo "workflow=deploy_org1-dev.yml" >> $GITHUB_OUTPUT ;;
+          stg)  echo "workflow=deploy_org1-stg.yml" >> $GITHUB_OUTPUT ;;
+          uat)  echo "workflow=deploy_org1-uat.yml" >> $GITHUB_OUTPUT ;;
+          prod) echo "workflow=deploy_org1-prod.yml" >> $GITHUB_OUTPUT ;;
+        esac
+
+    - name: Trigger Deploy Workflow
+      uses: actions/github-script@v7
+      with:
+        script: |
+          await github.rest.actions.createWorkflowDispatch({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            workflow_id: '${{ steps.deploy_workflow.outputs.workflow }}',
+            ref: 'main',
+            inputs: {
+              environment: '${{ github.event.inputs.environment }}',
+              version: '${{ needs.docker-build.outputs.service_version }}'
+            }
+          });
