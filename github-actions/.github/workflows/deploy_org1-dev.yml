@@ -1,0 +1,126 @@
+# ============================================================================
+# Workflow Name: Deploy Org1 UI to DEV
+# Purpose: Automatically deploy a specific version of Org1 UI to the DEV environment
+# ============================================================================
+name: Deploy Org1 UI to DEV
+
+# ============================================================================
+# Trigger: Manual workflow dispatch
+# This workflow can also be triggered manually from the GitHub Actions UI
+# ============================================================================
+on:
+  workflow_dispatch:
+    inputs:
+      # Input parameter: Target environment (defaults to 'dev')
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        default: 'dev'
+      
+      # Input parameter: Version/tag of the Docker image to deploy
+      version:
+        description: 'Version tag of image to deploy'
+        required: true
+
+# ============================================================================
+# Jobs Section: Defines the deployment job
+# ============================================================================
+jobs:
+  deploy:
+    # Job identifier for logs and UI
+    name: Deploy Org1 UI to DEV
+    
+    # Specifies the runner to execute this job (custom runner labeled 'cicd')
+    runs-on: cicd
+    
+    # Safety check: Only run if environment input is 'dev'
+    # Prevents accidental deployments to wrong environments
+    if: github.event.inputs.environment == 'dev'
+    
+    # ============================================================================
+    # Steps: Sequential tasks to perform the deployment
+    # ============================================================================
+    steps:
+      # ------------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # Purpose: Clone the repository code to the runner
+      # fetch-depth: 1 means shallow clone (only latest commit for speed)
+      # ------------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      
+      # ------------------------------------------------------------------------
+      # Step 2: Display deployment information
+      # Purpose: Log deployment details for visibility and audit trail
+      # Uses GitHub context variables to show version, environment, and workflow
+      # ------------------------------------------------------------------------
+      - name: Display deployment info
+        run: |
+          echo "🚀 Deploying version ${{ github.event.inputs.version }} to DEV"
+          echo "Target environment: ${{ github.event.inputs.environment }}"
+          echo "Triggered by workflow: ${{ github.workflow }}"
+      
+      # ------------------------------------------------------------------------
+      # Step 3: Copy environment configuration file
+      # Purpose: Transfer the .env file to the DEV server using SCP
+      # continue-on-error: false ensures workflow stops if this step fails
+      # Script location: .github/workflows/scripts/dev_org1_scp.sh
+      # ------------------------------------------------------------------------
+      - name: Copy .env file to DEV server
+        run: |
+          echo "📂 Copying updated .env file to target DEV server..."
+          bash ${GITHUB_WORKSPACE}/.github/workflows/scripts/dev_org1_scp.sh
+        continue-on-error: false
+      
+      # ------------------------------------------------------------------------
+      # Step 4: Execute deployment script
+      # Purpose: Run the main deployment script that deploys the new build
+      # This likely pulls the Docker image and restarts services
+      # continue-on-error: false ensures workflow stops if deployment fails
+      # Script location: .github/workflows/scripts/dev_org1_deploy.sh
+      # ------------------------------------------------------------------------
+      - name: Deploy new Build to Org1 DEV
+        run: |
+          echo "🚀 Running deployment script for DEV..."
+          bash ${GITHUB_WORKSPACE}/.github/workflows/scripts/dev_org1_deploy.sh
+        continue-on-error: false
+      
+      # ------------------------------------------------------------------------
+      # Step 5: Success Summary
+      # Purpose: Generate a formatted summary when deployment succeeds
+      # Conditional: Only runs if all previous steps succeeded
+      # Output: Displays in GitHub Actions summary tab with deployment details
+      # ------------------------------------------------------------------------
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "## ✅ DEV Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed Version:** ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment Time:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+      
+      # ------------------------------------------------------------------------
+      # Step 6: Failure Summary
+      # Purpose: Generate a formatted summary when deployment fails
+      # Conditional: Only runs if any previous step failed
+      # Output: Displays in GitHub Actions summary tab with failure details
+      # Helps with quick troubleshooting by providing context
+      # ------------------------------------------------------------------------
+      - name: Deployment Failed Summary
+        if: failure()
+        run: |
+          echo "## ❌ DEV Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Attempted Version:** ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failure Time:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ Please check the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+
+# ============================================================================
+# End of Workflow
+# ============================================================================
